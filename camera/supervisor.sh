@@ -77,20 +77,54 @@ heartbeat() {
     [ "$(cat /tmp/rec_status 2>/dev/null)" ] && $CARDV_MSG 0x5901 >/dev/null 2>&1
 }
 
+# "up" if the recorder serves this stream (DESCRIBE 200), else "down".
+rtsp_up() {
+    case "$(printf "DESCRIBE rtsp://$AP_IP/liveRTSP/$1 RTSP/1.0\r\nCSeq: 1\r\n\r\n" \
+            | nc -w 3 $AP_IP 554 2>/dev/null | head -1)" in
+        *200*) echo up ;;
+        *)     echo down ;;
+    esac
+}
+
+# Restart the recorder's RTSP server so it republishes every stream. The
+# settle after "rtsp 1" matters: the rear (av5) re-registers more slowly than
+# the front, so too short a wait leaves it 404.
+rtsp_recreate() {
+    echo rtsp 0 > /tmp/cardv_fifo; sleep 5; echo rtsp 1 > /tmp/cardv_fifo
+    sleep "${1:-5}"
+}
+
 rtsp_check() {
     [ "$(uptime_s)" -lt "${rtsp_quiet_until:-0}" ] && return
     [ $(( $(uptime_s) - ${rtsp_at:-0} )) -lt $RTSP_CHECK ] && return
     rtsp_at=$(uptime_s)
+
+    # Check every stream, not just the first. The front tears down every
+    # couple of minutes while idle, so returning on it (as before) meant the
+    # rear was never evaluated and a rear-only outage went unhealed.
+    down=
     for s in av4 av5; do
-        r=$(printf "DESCRIBE rtsp://$AP_IP/liveRTSP/$s RTSP/1.0\r\nCSeq: 1\r\n\r\n" | nc -w 3 $AP_IP 554 2>/dev/null | head -1)
-        case "$r" in
-            *200*) ;;
-            *) log "rtsp $s not served ($r); recreating RTSP sessions"
-               echo rtsp 0 > /tmp/cardv_fifo; sleep 5; echo rtsp 1 > /tmp/cardv_fifo
-               rtsp_quiet_until=$(( $(uptime_s) + 120 ))
-               return ;;
-        esac
+        [ "$(rtsp_up $s)" = down ] && down="$down $s"
     done
+    [ -z "$down" ] && return
+
+    log "rtsp down:$down; recreating RTSP sessions"
+    rtsp_recreate 5
+
+    # The rear sometimes needs a second, longer nudge to come back after a
+    # restart (seen at boot). Give any stream still missing one more try.
+    still=
+    for s in $down; do
+        [ "$(rtsp_up $s)" = down ] && still="$still $s"
+    done
+    if [ -n "$still" ]; then
+        log "rtsp still down after recreate:$still; retrying"
+        rtsp_recreate 10
+        for s in $still; do
+            [ "$(rtsp_up $s)" = up ] && log "rtsp $s recovered"
+        done
+    fi
+    rtsp_quiet_until=$(( $(uptime_s) + 120 ))
 }
 
 # Ask wpa_supplicant to look again when a better saved network may be around.
