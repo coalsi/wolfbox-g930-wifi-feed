@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Build scratch for the wpa_supplicant cross-build
+build/
+out/
+*.o
+
+# Never commit saved networks (SSIDs + derived WPA2 keys live here)
+networks.conf
+*.conf.local
